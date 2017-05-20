@@ -252,6 +252,10 @@ const BaseAppView = new Lang.Class({
         }
 
         Tweener.addTween(this._grid.actor, params);
+    },
+
+    get gridActor() {
+        return this._grid.actor;
     }
 });
 Signals.addSignalMethods(BaseAppView.prototype);
@@ -373,40 +377,53 @@ const PageIndicators = new Lang.Class({
 });
 Signals.addSignalMethods(PageIndicators.prototype);
 
+const AllViewContainer = new Lang.Class({
+    Name: 'AllViewContainer',
+    Extends: St.ScrollView,
+
+    _init: function(gridActor) {
+        this.parent({ x_fill: true,
+                      y_fill: false,
+                      y_align: Clutter.ActorAlign.START,
+                      x_expand: true,
+                      y_expand: true,
+                      overlay_scrollbars: true,
+                      hscrollbar_policy: Gtk.PolicyType.NEVER,
+                      vscrollbar_policy: Gtk.PolicyType.AUTOMATIC,
+                      style_class: 'all-apps vfade' });
+
+        this.gridActor = gridActor;
+        this.gridActor.y_expand = true;
+        this.gridActor.y_align = Clutter.ActorAlign.CENTER;
+
+        let box = new St.BoxLayout({ vertical: true });
+        this.stack = new St.Widget({ layout_manager: new Clutter.BinLayout() });
+
+        this.stack.add_actor(gridActor);
+        box.add(this.stack, { y_align: St.Align.START, expand: true });
+        this.add_actor(box);
+    }
+});
+
 const AllView = new Lang.Class({
     Name: 'AllView',
     Extends: BaseAppView,
 
     _init: function() {
         this.parent({ usePagination: false }, null);
-        this._scrollView = new St.ScrollView({ style_class: 'all-apps',
-                                               x_expand: true,
-                                               y_expand: true,
-                                               x_fill: true,
-                                               y_fill: false,
-                                               reactive: true,
-                                               y_align: St.Align.START });
-        this.actor = new St.Widget({ layout_manager: new Clutter.BinLayout(),
-                                     x_expand:true, y_expand:true });
-        this.actor.add_actor(this._scrollView);
+        this.actor = new AllViewContainer(this._grid.actor);
 
+        this._scrollView = this.actor;
         this._scrollView.set_policy(Gtk.PolicyType.NEVER,
                                     Gtk.PolicyType.EXTERNAL);
         this._adjustment = this._scrollView.vscroll.adjustment;
 
         this.folderIcons = [];
 
-        this._stack = new St.Widget({ layout_manager: new Clutter.BinLayout() });
-        let box = new St.BoxLayout({ vertical: true });
-
-        this._stack.add_actor(this._grid.actor);
         this._eventBlocker = new St.Widget({ x_expand: true, y_expand: true });
+
+        this._stack = this.actor.stack;
         this._stack.add_actor(this._eventBlocker);
-
-        box.add_actor(this._stack);
-        this._scrollView.add_actor(box);
-
-        this._scrollView.connect('scroll-event', Lang.bind(this, this._onScroll));
 
         this._clickAction = new Clutter.ClickAction();
         this._clickAction.connect('clicked', Lang.bind(this, function() {
@@ -800,6 +817,10 @@ const AppDisplay = new Lang.Class({
         let availHeight = box.y2 - box.y1;
 
         this._allView.adaptToSize(availWidth, availHeight);
+    },
+
+    get gridActor() {
+        return this._allView.gridActor;
     }
 })
 
