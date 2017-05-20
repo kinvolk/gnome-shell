@@ -55,11 +55,15 @@ const ViewsDisplayLayout = new Lang.Class({
     Name: 'ViewsDisplayLayout',
     Extends: Clutter.BinLayout,
 
-    _init: function(entry, searchResultsActor) {
+    _init: function(entry, allViewActor, searchResultsActor) {
         this.parent();
 
         this._entry = entry;
+        this._allViewActor = allViewActor;
         this._searchResultsActor = searchResultsActor;
+
+        this._entry.connect('style-changed', Lang.bind(this, this._onStyleChanged));
+        this._allViewActor.connect('style-changed', Lang.bind(this, this._onStyleChanged));
 
         this._entry.connect('style-changed', Lang.bind(this, this._onStyleChanged));
 
@@ -75,8 +79,10 @@ const ViewsDisplayLayout = new Lang.Class({
         if (v == this._searchResultsTween || this._searchResultsActor == null)
             return;
 
+        this._allViewActor.visible = v != 1;
         this._searchResultsActor.visible = v != 0;
 
+        this._allViewActor.opacity = (1 - v) * 255;
         this._searchResultsActor.opacity = v * 255;
 
         let entryTranslation = - this._heightAboveEntry * v;
@@ -91,6 +97,25 @@ const ViewsDisplayLayout = new Lang.Class({
         return this._searchResultsTween;
     },
 
+    _centeredHeightAbove: function (height, availHeight) {
+        return Math.floor(Math.max((availHeight - height) / 2, 0));
+    },
+
+    _calcAllViewPlacement: function (viewHeight, entryHeight, availHeight) {
+        // If we have the space for it, we add some padding to the top of the
+        // all view when calculating its centered position. This is to offset
+        // the icon labels at the bottom of the icon grid, so the icons
+        // themselves appears centered.
+        let themeNode = this._allViewActor.get_theme_node();
+        let topPadding = themeNode.get_length('-natural-padding-top');
+        let heightAbove = this._centeredHeightAbove(viewHeight + topPadding, availHeight);
+        let leftover = Math.max(availHeight - viewHeight - heightAbove, 0);
+        heightAbove += Math.min(topPadding, leftover);
+        // Always leave enough room for the search entry at the top
+        heightAbove = Math.max(entryHeight, heightAbove);
+        return heightAbove;
+    },
+
     vfunc_allocate: function(container, box, flags) {
         let availWidth = box.x2 - box.x1;
         let availHeight = box.y2 - box.y1;
@@ -102,10 +127,20 @@ const ViewsDisplayLayout = new Lang.Class({
         let entryTopMargin = themeNode.get_length('margin-top');
         entryHeight += entryMinPadding * 2;
 
+        // AllView height
+        let allViewHeight = this._allViewActor.get_preferred_height(availWidth)[1];
+        let heightAboveGrid = this._calcAllViewPlacement(allViewHeight, entryHeight, availHeight);
+        this._heightAboveEntry = this._centeredHeightAbove(entryHeight, heightAboveGrid);
+
         let entryBox = box.copy();
-        entryBox.y1 = entryTopMargin;
+        entryBox.y1 = this._heightAboveEntry + entryTopMargin;
         entryBox.y2 = entryBox.y1 + entryHeight;
         this._entry.allocate(entryBox, flags);
+
+        let allViewBox = box.copy();
+        allViewBox.y1 = heightAboveGrid;
+        allViewBox.y2 = Math.min(allViewBox.y1 + allViewHeight, box.y2);
+        this._allViewActor.allocate(allViewBox, flags);
 
         // The views clone does not have a searchResultsActor
         if (this._searchResultsActor) {
@@ -125,18 +160,20 @@ const ViewsDisplayContainer = new Lang.Class({
         'views-page-changed': { }
     },
 
-    _init: function(entry, searchResults) {
+    _init: function(entry, allView, searchResults) {
         this._activePage = null;
 
         this._entry = entry;
+        this._allView = allView;
         this._searchResults = searchResults;
 
-        let layoutManager = new ViewsDisplayLayout(entry, searchResults.actor);
+        let layoutManager = new ViewsDisplayLayout(entry, allView.actor, searchResults.actor);
         this.parent({ layout_manager: layoutManager,
                       x_expand: true,
                       y_expand: true });
 
         this.add_actor(this._entry);
+        this.add_actor(this._allView.actor);
         this.add_actor(this._searchResults.actor);
 
         this._activePage = ViewsDisplayPage.APP_GRID;
@@ -191,6 +228,8 @@ const ViewsDisplay = new Lang.Class({
         this._enterSearchTimeoutId = 0;
         this._localSearchMetricTimeoutId = 0;
 
+        this._allView = new AppDisplay.AppDisplay();
+
         this._searchResults = new Search.SearchResults();
         this._searchResults.connect('search-progress-updated', Lang.bind(this, this._updateSpinner));
         this._searchResults.connect('search-close-clicked', Lang.bind(this, this._resetSearch));
@@ -225,7 +264,7 @@ const ViewsDisplay = new Lang.Class({
         Main.overview.addAction(clickAction, false);
         this._searchResults.actor.bind_property('mapped', clickAction, 'enabled', GObject.BindingFlags.SYNC_CREATE);
 
-        this.actor = new ViewsDisplayContainer(this.entry, this._searchResults);
+        this.actor = new ViewsDisplayContainer(this.entry, this._allView, this._searchResults);
     },
 
     _recordDesktopSearchMetric: function (query, searchProvider) {
@@ -308,6 +347,10 @@ const ViewsDisplay = new Lang.Class({
 
     get activeViewsPage() {
         return this.actor.getActivePage();
+    },
+
+    get allView() {
+        return this._allView;
     }
 });
 
@@ -394,11 +437,17 @@ const ViewsClone = new Lang.Class({
         this._viewsDisplay = viewsDisplay;
         this._forOverview = forOverview;
 
+        let allView = this._viewsDisplay.allView;
         let entry = new ShellEntry.OverviewEntry();
         entry.reactive = false;
         entry.clutter_text.reactive = false;
 
-        let layoutManager = new ViewsDisplayLayout(entry, null);
+        let iconGridClone = new Clutter.Clone({ source: allView.gridActor,
+                                                x_expand: true });
+        let appGridContainer = new AppDisplay.AllViewContainer(iconGridClone);
+        appGridContainer.reactive = false;
+
+        let layoutManager = new ViewsDisplayLayout(entry, appGridContainer, null);
         this.parent({ layout_manager: layoutManager,
                       x_expand: true,
                       y_expand: true,
@@ -406,7 +455,10 @@ const ViewsClone = new Lang.Class({
 
         this._saturation = new Clutter.DesaturateEffect({ factor: AppDisplay.EOS_INACTIVE_GRID_SATURATION,
                                                           enabled: false });
+        iconGridClone.add_effect(this._saturation);
+
         this.add_child(entry);
+        this.add_child(appGridContainer);
 
         let workareaConstraint = new Monitor.MonitorConstraint({ primary: true,
                                                                  work_area: true });

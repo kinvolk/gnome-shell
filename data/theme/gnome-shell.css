@@ -2333,3 +2333,25 @@ stage {
     text-align: center;
     -x-offset: 8px;
 }
+
+.all-apps {
+    -natural-padding-top: 25px;
+}
+
+.all-apps > StBoxLayout {
+    /* horizontal padding to make sure scrollbars or dash don't overlap content */
+    padding: 0px 70px;
+}
+
+/* Application Launchers, Grid and List results */
+.icon-grid {
+    spacing: 10px;
+    -shell-grid-horizontal-item-size: 118px;
+    -shell-grid-vertical-item-size: 118px;
+}
+
+.overview-icon.dnd,
+.icon-grid .overview-icon {
+    icon-size: 64px;
+    spacing: 8px;
+}
