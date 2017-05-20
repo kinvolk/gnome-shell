@@ -378,7 +378,7 @@ const AllView = new Lang.Class({
     Extends: BaseAppView,
 
     _init: function() {
-        this.parent({ usePagination: true }, null);
+        this.parent({ usePagination: false }, null);
         this._scrollView = new St.ScrollView({ style_class: 'all-apps',
                                                x_expand: true,
                                                y_expand: true,
@@ -394,20 +394,11 @@ const AllView = new Lang.Class({
                                     Gtk.PolicyType.EXTERNAL);
         this._adjustment = this._scrollView.vscroll.adjustment;
 
-        this._pageIndicators = new PageIndicators();
-        this._pageIndicators.connect('page-activated', Lang.bind(this,
-            function(indicators, pageIndex) {
-                this.goToPage(pageIndex);
-            }));
-        this._pageIndicators.actor.connect('scroll-event', Lang.bind(this, this._onScroll));
-        this.actor.add_actor(this._pageIndicators.actor);
-
         this.folderIcons = [];
 
         this._stack = new St.Widget({ layout_manager: new Clutter.BinLayout() });
         let box = new St.BoxLayout({ vertical: true });
 
-        this._grid.currentPage = 0;
         this._stack.add_actor(this._grid.actor);
         this._eventBlocker = new St.Widget({ x_expand: true, y_expand: true });
         this._stack.add_actor(this._eventBlocker);
@@ -417,13 +408,6 @@ const AllView = new Lang.Class({
 
         this._scrollView.connect('scroll-event', Lang.bind(this, this._onScroll));
 
-        let panAction = new Clutter.PanAction({ interpolate: false });
-        panAction.connect('pan', Lang.bind(this, this._onPan));
-        panAction.connect('gesture-cancel', Lang.bind(this, this._onPanEnd));
-        panAction.connect('gesture-end', Lang.bind(this, this._onPanEnd));
-        this._panAction = panAction;
-        this._scrollView.add_action(panAction);
-        this._panning = false;
         this._clickAction = new Clutter.ClickAction();
         this._clickAction.connect('clicked', Lang.bind(this, function() {
             if (!this._currentPopup)
@@ -441,10 +425,6 @@ const AllView = new Lang.Class({
         this._availWidth = 0;
         this._availHeight = 0;
 
-        Main.overview.connect('hidden', Lang.bind(this,
-            function() {
-                this.goToPage(0);
-            }));
         this._grid.connect('space-opened', Lang.bind(this,
             function() {
                 this._scrollView.get_effect('fade').enabled = false;
@@ -565,8 +545,6 @@ const AllView = new Lang.Class({
                 }));
         } else {
             this.parent(animationDirection, completionFunc);
-            if (animationDirection == IconGrid.AnimationDirection.OUT)
-                this._pageIndicators.animateIndicators(animationDirection);
         }
     },
 
@@ -582,66 +560,11 @@ const AllView = new Lang.Class({
                                onComplete: function() {
                                   this.opacity = 255;
                                } });
-
-        if (animationDirection == IconGrid.AnimationDirection.OUT)
-            this._pageIndicators.animateIndicators(animationDirection);
-    },
-
-    getCurrentPageY: function() {
-        return this._grid.getPageY(this._grid.currentPage);
-    },
-
-    goToPage: function(pageNumber) {
-        pageNumber = clamp(pageNumber, 0, this._grid.nPages() - 1);
-
-        if (this._grid.currentPage == pageNumber && this._displayingPopup && this._currentPopup)
-            return;
-        if (this._displayingPopup && this._currentPopup)
-            this._currentPopup.popdown();
-
-        let velocity;
-        if (!this._panning)
-            velocity = 0;
-        else
-            velocity = Math.abs(this._panAction.get_velocity(0)[2]);
-        // Tween the change between pages.
-        // If velocity is not specified (i.e. scrolling with mouse wheel),
-        // use the same speed regardless of original position
-        // if velocity is specified, it's in pixels per milliseconds
-        let diffToPage = this._diffToPage(pageNumber);
-        let childBox = this._scrollView.get_allocation_box();
-        let totalHeight = childBox.y2 - childBox.y1;
-        let time;
-        // Only take the velocity into account on page changes, otherwise
-        // return smoothly to the current page using the default velocity
-        if (this._grid.currentPage != pageNumber) {
-            let minVelocity = totalHeight / (PAGE_SWITCH_TIME * 1000);
-            velocity = Math.max(minVelocity, velocity);
-            time = (diffToPage / velocity) / 1000;
-        } else {
-            time = PAGE_SWITCH_TIME * diffToPage / totalHeight;
-        }
-        // When changing more than one page, make sure to not take
-        // longer than PAGE_SWITCH_TIME
-        time = Math.min(time, PAGE_SWITCH_TIME);
-
-        this._grid.currentPage = pageNumber;
-        Tweener.addTween(this._adjustment,
-                         { value: this._grid.getPageY(this._grid.currentPage),
-                           time: time,
-                           transition: 'easeOutQuad' });
-        this._pageIndicators.setCurrentPage(pageNumber);
-    },
-
-    _diffToPage: function (pageNumber) {
-        let currentScrollPosition = this._adjustment.value;
-        return Math.abs(currentScrollPosition - this._grid.getPageY(pageNumber));
     },
 
     openSpaceForPopup: function(item, side, nRows) {
         this._updateIconOpacities(true);
         this._displayingPopup = true;
-        this._grid.openExtraSpace(item, side, nRows);
     },
 
     _closeSpaceForPopup: function() {
@@ -650,60 +573,9 @@ const AllView = new Lang.Class({
         this._grid.closeExtraSpace();
     },
 
-    _onScroll: function(actor, event) {
-        if (this._displayingPopup || !this._scrollView.reactive)
-            return Clutter.EVENT_STOP;
-
-        let direction = event.get_scroll_direction();
-        if (direction == Clutter.ScrollDirection.UP)
-            this.goToPage(this._grid.currentPage - 1);
-        else if (direction == Clutter.ScrollDirection.DOWN)
-            this.goToPage(this._grid.currentPage + 1);
-
-        return Clutter.EVENT_STOP;
-    },
-
-    _onPan: function(action) {
-        if (this._displayingPopup)
-            return false;
-        this._panning = true;
-        this._clickAction.release();
-        let [dist, dx, dy] = action.get_motion_delta(0);
-        let adjustment = this._adjustment;
-        adjustment.value -= (dy / this._scrollView.height) * adjustment.page_size;
-        return false;
-    },
-
-    _onPanEnd: function(action) {
-         if (this._displayingPopup)
-            return;
-
-        let pageHeight = this._grid.getPageHeight();
-
-        // Calculate the scroll value we'd be at, which is our current
-        // scroll plus any velocity the user had when they released
-        // their finger.
-
-        let velocity = -action.get_velocity(0)[2];
-        let endPanValue = this._adjustment.value + velocity;
-
-        let closestPage = Math.round(endPanValue / pageHeight);
-        this.goToPage(closestPage);
-
-        this._panning = false;
-    },
-
     _onKeyPressEvent: function(actor, event) {
         if (this._displayingPopup)
             return Clutter.EVENT_STOP;
-
-        if (event.get_key_symbol() == Clutter.Page_Up) {
-            this.goToPage(this._grid.currentPage - 1);
-            return Clutter.EVENT_STOP;
-        } else if (event.get_key_symbol() == Clutter.Page_Down) {
-            this.goToPage(this._grid.currentPage + 1);
-            return Clutter.EVENT_STOP;
-        }
 
         return Clutter.EVENT_PROPAGATE;
     },
@@ -718,11 +590,6 @@ const AllView = new Lang.Class({
                 if(!isOpen)
                     this._closeSpaceForPopup();
             }));
-    },
-
-    _keyFocusIn: function(icon) {
-        let itemPage = this._grid.getItemPage(icon);
-        this.goToPage(itemPage);
     },
 
     _updateIconOpacities: function(folderOpen) {
@@ -751,7 +618,6 @@ const AllView = new Lang.Class({
         box = this._grid.actor.get_theme_node().get_content_box(box);
         let availWidth = box.x2 - box.x1;
         let availHeight = box.y2 - box.y1;
-        let oldNPages = this._grid.nPages();
 
         this._grid.adaptToSize(availWidth, availHeight);
 
@@ -761,14 +627,9 @@ const AllView = new Lang.Class({
         if (fadeOffset > 0)
             this._scrollView.get_effect('fade').fade_edges = true;
 
-        if (this._availWidth != availWidth || this._availHeight != availHeight || oldNPages != this._grid.nPages()) {
+        if (this._availWidth != availWidth || this._availHeight != availHeight) {
             this._adjustment.value = 0;
             this._grid.currentPage = 0;
-            Meta.later_add(Meta.LaterType.BEFORE_REDRAW, Lang.bind(this,
-                function() {
-                    this._pageIndicators.setNPages(this._grid.nPages());
-                    this._pageIndicators.setCurrentPage(0);
-                }));
         }
 
         this._availWidth = availWidth;
@@ -1218,7 +1079,7 @@ const FolderIcon = new Lang.Class({
     },
 
     _calculateBoxPointerArrowSide: function() {
-        let spaceTop = this.actor.y - this._parentView.getCurrentPageY();
+        let spaceTop = this.actor.y;
         let spaceBottom = this._parentView.actor.height - (spaceTop + this.actor.height);
 
         return spaceTop > spaceBottom ? St.Side.BOTTOM : St.Side.TOP;
