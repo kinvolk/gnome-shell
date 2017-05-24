@@ -157,7 +157,8 @@ const GridSearchResult = new Lang.Class({
         this.actor.style_class = 'grid-search-result';
 
         this.icon = new IconGrid.BaseIcon(this.metaInfo['name'],
-                                          { createIcon: this.metaInfo['createIcon'] });
+                                          { createIcon: this.metaInfo['createIcon'] },
+                                          { reactive: false });
         let content = new St.Bin({ child: this.icon.actor });
         this.actor.set_child(content);
         this.actor.label_actor = this.icon.label;

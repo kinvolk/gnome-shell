@@ -1327,12 +1327,10 @@ const AppIcon = new Lang.Class({
         this.id = app.get_id();
         this.name = app.get_name();
 
-        this.actor = new St.Button({ style_class: 'app-well-app',
-                                     reactive: true,
-                                     button_mask: St.ButtonMask.ONE | St.ButtonMask.TWO,
-                                     can_focus: true,
-                                     x_fill: true,
-                                     y_fill: true });
+        this.actor = new St.Bin({ style_class: 'app-well-app',
+                                  can_focus: true,
+                                  x_fill: true,
+                                  y_fill: true });
 
         this._dot = new St.Widget({ style_class: 'app-well-app-running-dot',
                                     layout_manager: new Clutter.BinLayout(),
@@ -1358,22 +1356,31 @@ const AppIcon = new Lang.Class({
 
         iconParams['createIcon'] = Lang.bind(this, this._createIcon);
         iconParams['setSizeManually'] = true;
-        this.icon = new IconGrid.BaseIcon(app.get_name(), iconParams);
+
+        let buttonParams = Params.parse(buttonParams,
+                                        { button_mask: St.ButtonMask.ONE |
+                                          St.ButtonMask.TWO |
+                                          St.ButtonMask.THREE },
+                                        true);
+
+        this.icon = new IconGrid.BaseIcon(app.get_name(), iconParams, buttonParams);
         this._iconContainer.add_child(this.icon.actor);
 
         this.actor.label_actor = this.icon.label;
 
-        this.actor.connect('leave-event', Lang.bind(this, this._onLeaveEvent));
-        this.actor.connect('button-press-event', Lang.bind(this, this._onButtonPress));
-        this.actor.connect('touch-event', Lang.bind(this, this._onTouchEvent));
-        this.actor.connect('clicked', Lang.bind(this, this._onClicked));
-        this.actor.connect('popup-menu', Lang.bind(this, this._onKeyboardPopupMenu));
+        this.iconButton = this.icon.iconButton;
+        this.iconButton._delegate = this;
+        this.iconButton.connect('leave-event', Lang.bind(this, this._onLeaveEvent));
+        this.iconButton.connect('button-press-event', Lang.bind(this, this._onButtonPress));
+        this.iconButton.connect('touch-event', Lang.bind(this, this._onTouchEvent));
+        this.iconButton.connect('clicked', Lang.bind(this, this._onClicked));
+        this.iconButton.connect('popup-menu', Lang.bind(this, this._onKeyboardPopupMenu));
 
         this._menu = null;
         this._menuManager = new PopupMenu.PopupMenuManager(this);
 
         if (isDraggable) {
-            this._draggable = DND.makeDraggable(this.actor);
+            this._draggable = DND.makeDraggable(this.iconButton);
             this._draggable.connect('drag-begin', Lang.bind(this,
                 function () {
                     this._removeMenuTimeout();
@@ -1436,7 +1443,7 @@ const AppIcon = new Lang.Class({
     },
 
     _onLeaveEvent: function(actor, event) {
-        this.actor.fake_release();
+        this.iconButton.fake_release();
         this._removeMenuTimeout();
     },
 
@@ -1474,7 +1481,7 @@ const AppIcon = new Lang.Class({
 
     popupMenu: function() {
         this._removeMenuTimeout();
-        this.actor.fake_release();
+        this.iconButton.fake_release();
 
         if (this._draggable)
             this._draggable.fakeRelease();
@@ -1498,7 +1505,7 @@ const AppIcon = new Lang.Class({
 
         this.emit('menu-state-changed', true);
 
-        this.actor.set_hover(true);
+        this.iconButton.set_hover(true);
         this._menu.popup();
         this._menuManager.ignoreRelease();
         this.emit('sync-tooltip');
@@ -1515,7 +1522,7 @@ const AppIcon = new Lang.Class({
     },
 
     _onMenuPoppedDown: function() {
-        this.actor.sync_hover();
+        this.iconButton.sync_hover();
         this.emit('menu-state-changed', false);
     },
 
