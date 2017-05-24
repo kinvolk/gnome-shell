@@ -12,7 +12,7 @@ const Params = imports.misc.params;
 const Tweener = imports.ui.tweener;
 const Main = imports.ui.main;
 
-const ICON_SIZE = 96;
+const ICON_SIZE = 64;
 const MIN_ICON_SIZE = 16;
 
 const EXTRA_SPACE_ANIMATION_TIME = 0.25;
@@ -37,7 +37,7 @@ const APPICON_ANIMATION_OUT_TIME = 0.25;
 const BaseIcon = new Lang.Class({
     Name: 'BaseIcon',
 
-    _init : function(label, params) {
+    _init : function(label, params, buttonParams) {
         params = Params.parse(params, { createIcon: null,
                                         setSizeManually: false,
                                         showLabel: true });
@@ -66,10 +66,14 @@ const BaseIcon = new Lang.Class({
         this.actor.set_child(box);
 
         this.iconSize = ICON_SIZE;
-        this._iconBin = new St.Bin({ x_align: St.Align.MIDDLE,
-                                     y_align: St.Align.MIDDLE });
 
-        box.add_actor(this._iconBin);
+        buttonParams = Params.parse(buttonParams, { x_align: St.Align.MIDDLE,
+                                                    y_align: St.Align.MIDDLE },
+                                    true);
+
+        this.iconButton = new St.Button(buttonParams);
+        this.iconButton.add_style_class_name('icon-button');
+        box.add_actor(this.iconButton);
 
         if (params.showLabel) {
             this.label = new St.Label({ text: label });
@@ -94,8 +98,8 @@ const BaseIcon = new Lang.Class({
 
         let iconSize = availHeight;
 
-        let [iconMinHeight, iconNatHeight] = this._iconBin.get_preferred_height(-1);
-        let [iconMinWidth, iconNatWidth] = this._iconBin.get_preferred_width(-1);
+        let [iconMinHeight, iconNatHeight] = this.iconButton.get_preferred_height(-1);
+        let [iconMinWidth, iconNatWidth] = this.iconButton.get_preferred_width(-1);
         let preferredHeight = iconNatHeight;
 
         let childBox = new Clutter.ActorBox();
@@ -119,7 +123,7 @@ const BaseIcon = new Lang.Class({
         childBox.y1 = Math.floor((iconSize - iconNatHeight) / 2);
         childBox.x2 = childBox.x1 + iconNatWidth;
         childBox.y2 = childBox.y1 + iconNatHeight;
-        this._iconBin.allocate(childBox, flags);
+        this.iconButton.allocate(childBox, flags);
     },
 
     _getPreferredWidth: function(actor, forHeight, alloc) {
@@ -127,7 +131,7 @@ const BaseIcon = new Lang.Class({
     },
 
     _getPreferredHeight: function(actor, forWidth, alloc) {
-        let [iconMinHeight, iconNatHeight] = this._iconBin.get_preferred_height(forWidth);
+        let [iconMinHeight, iconNatHeight] = this.iconButton.get_preferred_height(forWidth);
         alloc.min_size = iconMinHeight;
         alloc.natural_size = iconNatHeight;
 
@@ -160,7 +164,7 @@ const BaseIcon = new Lang.Class({
         this.iconSize = size;
         this.icon = this.createIcon(this.iconSize);
 
-        this._iconBin.child = this.icon;
+        this.iconButton.child = this.icon;
     },
 
     _onStyleChanged: function() {
@@ -175,7 +179,7 @@ const BaseIcon = new Lang.Class({
             size = found ? len : ICON_SIZE;
         }
 
-        if (this.iconSize == size && this._iconBin.child)
+        if (this.iconSize == size && this.iconButton.child)
             return;
 
         this._createIconTexture(size);
