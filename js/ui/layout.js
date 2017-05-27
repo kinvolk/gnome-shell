@@ -309,6 +309,15 @@ const LayoutManager = new Lang.Class({
         this.emit('hot-corners-changed');
     },
 
+    prepareForOverview: function() {
+        Main.overview.opacityPrepared = true;
+        Tweener.addTween(this._viewsClone,
+                         { opacity: AppDisplay.EOS_ACTIVE_GRID_OPACITY,
+                           saturation: AppDisplay.EOS_ACTIVE_GRID_SATURATION,
+                           time: 0.25,
+                           transition: AppDisplay.EOS_ACTIVE_GRID_TRANSITION });
+    },
+
     setViewsClone: function(actor) {
         this._viewsClone = actor;
         this._backgroundGroup.add_child(this._viewsClone);

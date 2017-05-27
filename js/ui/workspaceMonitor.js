@@ -10,7 +10,9 @@ const WorkspaceMonitor = new Lang.Class({
 
     _init: function() {
         this._shellwm = global.window_manager;
+        this._shellwm.connect('minimize', Lang.bind(this, this._windowDisappearing));
         this._shellwm.connect('minimize-completed', Lang.bind(this, this._updateOverview));
+        this._shellwm.connect('destroy', Lang.bind(this, this._windowDisappearing));
         this._shellwm.connect('destroy-completed', Lang.bind(this, this._updateOverview));
 
         this._metaScreen = global.screen;
@@ -30,10 +32,40 @@ const WorkspaceMonitor = new Lang.Class({
         }
     },
 
+    _windowDisappearing: function(shellwm, actor) {
+        function _isLastWindow(apps, win) {
+            if (apps.length == 0) {
+                return true;
+            }
+
+            if (apps.length > 1) {
+                return false;
+            }
+
+            let windows = apps[0].get_windows();
+            return (windows.length == 1) && (windows[0] == win);
+        };
+
+        let visibleApps = this._getVisibleApps();
+        if (_isLastWindow(visibleApps, actor.meta_window)) {
+            Main.layoutManager.prepareForOverview();
+        }
+    },
+
     _updateOverview: function() {
         let visibleApps = this._getVisibleApps();
-        if (visibleApps.length != 0 && this._inFullscreen)
+        if (visibleApps.length == 0) {
+            // Even if no apps are visible, if there is an app starting up, we
+            // do not show the overview as it's likely that a window will be
+            // shown. This avoids problems of windows being mapped while the
+            // overview is being shown.
+            if (!this._appSystem.has_starting_apps()) {
+                Main.overview.showApps();
+            }
+        } else if (this._inFullscreen) {
+            // Hide in fullscreen mode
             Main.overview.hide();
+        }
     },
 
     _getVisibleApps: function() {
