@@ -8,6 +8,7 @@ const Shell = imports.gi.Shell;
 const Signals = imports.signals;
 const St = imports.gi.St;
 
+const AppDisplay = imports.ui.appDisplay;
 const Background = imports.ui.background;
 const BackgroundMenu = imports.ui.backgroundMenu;
 const LoginManager = imports.misc.loginManager;
@@ -306,6 +307,11 @@ const LayoutManager = new Lang.Class({
         }
 
         this.emit('hot-corners-changed');
+    },
+
+    setViewsClone: function(actor) {
+        this._viewsClone = actor;
+        this._backgroundGroup.add_child(this._viewsClone);
     },
 
     _addBackgroundMenu: function(bgManager) {
@@ -1227,7 +1233,7 @@ const HotCorner = new Lang.Class({
 
         if (Main.overview.shouldToggleByCornerOrButton()) {
             this._rippleAnimation();
-            Main.overview.toggle();
+            Main.overview.toggleWindows();
         }
     },
 

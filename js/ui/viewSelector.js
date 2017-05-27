@@ -1,9 +1,11 @@
 // -*- mode: js; js-indent-level: 4; indent-tabs-mode: nil -*-
 
 const Clutter = imports.gi.Clutter;
+const EosMetrics = imports.gi.EosMetrics;
 const Gio = imports.gi.Gio;
 const GLib = imports.gi.GLib;
 const Gtk = imports.gi.Gtk;
+const GObject = imports.gi.GObject;
 const Mainloop = imports.mainloop;
 const Meta = imports.gi.Meta;
 const Signals = imports.signals;
@@ -13,6 +15,7 @@ const St = imports.gi.St;
 
 const AppDisplay = imports.ui.appDisplay;
 const Main = imports.ui.main;
+const Monitor = imports.ui.monitor;
 const OverviewControls = imports.ui.overviewControls;
 const Params = imports.misc.params;
 const Search = imports.ui.search;
@@ -24,11 +27,150 @@ const IconGrid = imports.ui.iconGrid;
 
 const SHELL_KEYBINDINGS_SCHEMA = 'org.gnome.shell.keybindings';
 
+const SEARCH_ACTIVATION_TIMEOUT = 50;
+const SEARCH_METRIC_INACTIVITY_TIMEOUT_SECONDS = 3;
+
+// Occurs when a user initiates a search from the desktop. The payload, with
+// type `(us)`, consists of an enum value from the DesktopSearchProvider enum
+// telling what kind of search was requested; followed by the search query.
+const EVENT_DESKTOP_SEARCH = 'b02266bc-b010-44b2-ae0f-8f116ffa50eb';
+// Represents the various search providers that can be used for searching from
+// the desktop. Keep in sync with the corresponding enum in
+// https://github.com/endlessm/eos-analytics/tree/master/src/main/java/com/endlessm/postprocessing/query/SearchQuery.java.
+const DesktopSearchProvider = {
+    MY_COMPUTER: 0,
+};
+
 const ViewPage = {
     WINDOWS: 1,
-    APPS: 2,
-    SEARCH: 3
+    APPS: 2
 };
+
+const ViewsDisplayPage = {
+    APP_GRID: 1,
+    SEARCH: 2,
+};
+
+const ViewsDisplayLayout = new Lang.Class({
+    Name: 'ViewsDisplayLayout',
+    Extends: Clutter.BinLayout,
+
+    _init: function(entry, searchResultsActor) {
+        this.parent();
+
+        this._entry = entry;
+        this._searchResultsActor = searchResultsActor;
+
+        this._entry.connect('style-changed', Lang.bind(this, this._onStyleChanged));
+
+        this._heightAboveEntry = 0;
+        this.searchResultsTween = 0;
+    },
+
+    _onStyleChanged: function() {
+        this.layout_changed();
+    },
+
+    set searchResultsTween(v) {
+        if (v == this._searchResultsTween || this._searchResultsActor == null)
+            return;
+
+        this._searchResultsActor.visible = v != 0;
+
+        this._searchResultsActor.opacity = v * 255;
+
+        let entryTranslation = - this._heightAboveEntry * v;
+        this._entry.translation_y = entryTranslation;
+
+        this._searchResultsActor.translation_y = entryTranslation;
+
+        this._searchResultsTween = v;
+    },
+
+    get searchResultsTween() {
+        return this._searchResultsTween;
+    },
+
+    vfunc_allocate: function(container, box, flags) {
+        let availWidth = box.x2 - box.x1;
+        let availHeight = box.y2 - box.y1;
+
+        // Entry height
+        let entryHeight = this._entry.get_preferred_height(availWidth)[1];
+        let themeNode = this._entry.get_theme_node();
+        let entryMinPadding = themeNode.get_length('-minimum-vpadding');
+        let entryTopMargin = themeNode.get_length('margin-top');
+        entryHeight += entryMinPadding * 2;
+
+        let entryBox = box.copy();
+        entryBox.y1 = entryTopMargin;
+        entryBox.y2 = entryBox.y1 + entryHeight;
+        this._entry.allocate(entryBox, flags);
+
+        // The views clone does not have a searchResultsActor
+        if (this._searchResultsActor) {
+            let searchResultsBox = box.copy();
+            let searchResultsHeight = availHeight - entryHeight;
+            searchResultsBox.y1 = entryBox.y2;
+            searchResultsBox.y2 = searchResultsBox.y1 + searchResultsHeight;
+            this._searchResultsActor.allocate(searchResultsBox, flags);
+        }
+    }
+});
+
+const ViewsDisplayContainer = new Lang.Class({
+    Name: 'ViewsDisplayContainer',
+    Extends: St.Widget,
+    Signals: {
+        'views-page-changed': { }
+    },
+
+    _init: function(entry, searchResults) {
+        this._activePage = null;
+
+        this._entry = entry;
+        this._searchResults = searchResults;
+
+        let layoutManager = new ViewsDisplayLayout(entry, searchResults.actor);
+        this.parent({ layout_manager: layoutManager,
+                      x_expand: true,
+                      y_expand: true });
+
+        this.add_actor(this._entry);
+        this.add_actor(this._searchResults.actor);
+
+        this._activePage = ViewsDisplayPage.APP_GRID;
+    },
+
+    _onTweenComplete: function() {
+        this._searchResults.isAnimating = false;
+    },
+
+    showPage: function(page, doAnimation) {
+        if (this._activePage !== page) {
+            this._activePage = page;
+            this.emit('views-page-changed');
+        }
+
+        let tweenTarget = page == ViewsDisplayPage.SEARCH ? 1 : 0;
+        if (doAnimation) {
+            this._searchResults.isAnimating = true;
+            Tweener.addTween(this.layout_manager,
+                             { searchResultsTween: tweenTarget,
+                               transition: 'easeOutQuad',
+                               time: 0.25,
+                               onComplete: this._onTweenComplete,
+                               onCompleteScope: this,
+                             });
+        } else {
+            this.layout_manager.searchResultsTween = tweenTarget;
+        }
+    },
+
+    getActivePage: function() {
+        return this._activePage;
+    }
+});
 
 const FocusTrap = new Lang.Class({
     Name: 'FocusTrap',
@@ -39,6 +181,133 @@ const FocusTrap = new Lang.Class({
             direction == Gtk.DirectionType.TAB_BACKWARD)
             return this.parent(from, direction);
         return false;
+    }
+});
+
+const ViewsDisplay = new Lang.Class({
+    Name: 'ViewsDisplay',
+
+    _init: function() {
+        this._enterSearchTimeoutId = 0;
+        this._localSearchMetricTimeoutId = 0;
+
+        this._searchResults = new Search.SearchResults();
+        this._searchResults.connect('search-progress-updated', Lang.bind(this, this._updateSpinner));
+        this._searchResults.connect('search-close-clicked', Lang.bind(this, this._resetSearch));
+
+        // Since the entry isn't inside the results container we install this
+        // dummy widget as the last results container child so that we can
+        // include the entry in the keynav tab path
+        this._focusTrap = new FocusTrap({ can_focus: true });
+        this._focusTrap.connect('key-focus-in', Lang.bind(this, function() {
+            this.entry.grab_key_focus();
+        }));
+        this._searchResults.actor.add_actor(this._focusTrap);
+
+        global.focus_manager.add_group(this._searchResults.actor);
+
+        this.entry = new ShellEntry.OverviewEntry();
+        this.entry.connect('search-activated', Lang.bind(this, this._onSearchActivated));
+        this.entry.connect('search-active-changed', Lang.bind(this, this._onSearchActiveChanged));
+        this.entry.connect('search-navigate-focus', Lang.bind(this, this._onSearchNavigateFocus));
+        this.entry.connect('search-terms-changed', Lang.bind(this, this._onSearchTermsChanged));
+
+        this.entry.clutter_text.connect('key-focus-in', Lang.bind(this, function() {
+            this._searchResults.highlightDefault(true);
+        }));
+        this.entry.clutter_text.connect('key-focus-out', Lang.bind(this, function() {
+            this._searchResults.highlightDefault(false);
+        }));
+
+        // Clicking on any empty area should exit search and get back to the desktop.
+        let clickAction = new Clutter.ClickAction();
+        clickAction.connect('clicked', Lang.bind(this, this._resetSearch));
+        Main.overview.addAction(clickAction, false);
+        this._searchResults.actor.bind_property('mapped', clickAction, 'enabled', GObject.BindingFlags.SYNC_CREATE);
+
+        this.actor = new ViewsDisplayContainer(this.entry, this._searchResults);
+    },
+
+    _recordDesktopSearchMetric: function (query, searchProvider) {
+        let eventRecorder = EosMetrics.EventRecorder.get_default();
+        let auxiliaryPayload =
+            new GLib.Variant('(us)', [searchProvider, query]);
+        eventRecorder.record_event(EVENT_DESKTOP_SEARCH, auxiliaryPayload);
+    },
+
+    _updateSpinner: function() {
+        this.entry.setSpinning(this._searchResults.searchInProgress);
+    },
+
+    _enterLocalSearch: function() {
+        if (this._enterSearchTimeoutId > 0)
+            return;
+
+        // We give a very short time for search results to populate before
+        // triggering the animation, unless an animation is already in progress
+        if (this._searchResults.isAnimating) {
+            this.actor.showPage(ViewsDisplayPage.SEARCH, true);
+            return;
+        }
+
+        this._enterSearchTimeoutId = Mainloop.timeout_add(SEARCH_ACTIVATION_TIMEOUT, Lang.bind(this, function () {
+            this._enterSearchTimeoutId = 0;
+            this.actor.showPage(ViewsDisplayPage.SEARCH, true);
+        }));
+    },
+
+    _leaveLocalSearch: function() {
+        if (this._enterSearchTimeoutId > 0) {
+            Mainloop.source_remove(this._enterSearchTimeoutId);
+            this._enterSearchTimeoutId = 0;
+        }
+        this.actor.showPage(ViewsDisplayPage.APP_GRID, true);
+    },
+
+    _onSearchActivated: function() {
+        this._searchResults.activateDefault();
+        this._resetSearch();
+    },
+
+    _onSearchActiveChanged: function() {
+        if (this.entry.active) {
+            this._enterLocalSearch();
+        } else {
+            this._leaveLocalSearch();
+        }
+    },
+
+    _onSearchNavigateFocus: function(entry, direction) {
+        this._searchResults.navigateFocus(direction);
+    },
+
+    _onSearchTermsChanged: function() {
+        let terms = this.entry.getSearchTerms();
+        this._searchResults.setTerms(terms);
+
+        // Since the search is live, only record a metric a few seconds after
+        // the user has stopped typing. Don't record one if the user deleted
+        // what they wrote and left it at that.
+        if (this._localSearchMetricTimeoutId > 0)
+            Mainloop.source_remove(this._localSearchMetricTimeoutId);
+        this._localSearchMetricTimeoutId = Mainloop.timeout_add_seconds(
+            SEARCH_METRIC_INACTIVITY_TIMEOUT_SECONDS,
+            function () {
+                let query = terms.join(' ');
+                if (query !== '')
+                    this._recordDesktopSearchMetric(query,
+                        DesktopSearchProvider.MY_COMPUTER);
+                this._localSearchMetricTimeoutId = 0;
+                return GLib.SOURCE_REMOVE;
+            }.bind(this));
+    },
+
+    _resetSearch: function() {
+        this.entry.resetSearch();
+    },
+
+    get activeViewsPage() {
+        return this.actor.getActivePage();
     }
 });
 
@@ -114,127 +383,189 @@ const ShowOverviewAction = new Lang.Class({
     }
 });
 
+const ViewsClone = new Lang.Class({
+    Name: 'ViewsClone',
+    Extends: St.Widget,
+
+    _init: function(viewSelector, viewsDisplay, forOverview) {
+        let settings = Clutter.Settings.get_default();
+
+        this._viewSelector = viewSelector;
+        this._viewsDisplay = viewsDisplay;
+        this._forOverview = forOverview;
+
+        let entry = new ShellEntry.OverviewEntry();
+        entry.reactive = false;
+        entry.clutter_text.reactive = false;
+
+        let layoutManager = new ViewsDisplayLayout(entry, null);
+        this.parent({ layout_manager: layoutManager,
+                      x_expand: true,
+                      y_expand: true,
+                      opacity: AppDisplay.EOS_INACTIVE_GRID_OPACITY });
+
+        this._saturation = new Clutter.DesaturateEffect({ factor: AppDisplay.EOS_INACTIVE_GRID_SATURATION,
+                                                          enabled: false });
+        this.add_child(entry);
+
+        let workareaConstraint = new Monitor.MonitorConstraint({ primary: true,
+                                                                 work_area: true });
+        this.add_constraint(workareaConstraint);
+
+        Main.overview.connect('showing', Lang.bind(this, function() {
+            this.opacity = AppDisplay.EOS_INACTIVE_GRID_OPACITY;
+            this._saturation.factor = AppDisplay.EOS_INACTIVE_GRID_SATURATION;
+            this._saturation.enabled = this._forOverview;
+        }));
+        Main.overview.connect('hidden', Lang.bind(this, function() {
+            this.opacity = AppDisplay.EOS_INACTIVE_GRID_OPACITY;
+            this._saturation.factor = AppDisplay.EOS_INACTIVE_GRID_SATURATION;
+            this._saturation.enabled = !this._forOverview;
+
+            // When we're hidden and coming from the apps page, tween out the
+            // clone saturation and opacity in the background as an override
+            if (!this._forOverview &&
+                this._viewSelector.getActivePage() == ViewPage.APPS) {
+                this.opacity = AppDisplay.EOS_ACTIVE_GRID_OPACITY;
+                this.saturation = AppDisplay.EOS_ACTIVE_GRID_SATURATION;
+                Tweener.addTween(this,
+                                 { opacity: AppDisplay.EOS_INACTIVE_GRID_OPACITY,
+                                   saturation: AppDisplay.EOS_INACTIVE_GRID_SATURATION,
+                                   time: OverviewControls.SIDE_CONTROLS_ANIMATION_TIME,
+                                   transition: 'easeOutQuad' });
+            }
+        }));
+
+        settings.connect('notify::font-dpi', Lang.bind(this, function() {
+            let overviewVisible = Main.layoutManager.overviewGroup.visible;
+            let saturationEnabled = this._saturation.enabled;
+
+            /* Maybe because of the already known issue with FBO and ClutterClones,
+             * simply redrawing the overview group without assuring it is visible
+             * won't work. Clutter was supposed to do that, but it doesn't. The
+             * FBO, in this case, is introduced through the saturation effect.
+             */
+            this._saturation.enabled = false;
+            Main.layoutManager.overviewGroup.visible = true;
+
+            Main.layoutManager.overviewGroup.queue_redraw();
+
+            /* Restore the previous states */
+            Main.layoutManager.overviewGroup.visible = overviewVisible;
+            this._saturation.enabled = saturationEnabled;
+        }));
+    },
+
+    set saturation(factor) {
+        this._saturation.factor = factor;
+    },
+
+    get saturation() {
+        return this._saturation.factor;
+    }
+});
+
+const ViewsDisplayConstraint = new Lang.Class({
+    Name: 'ViewsDisplayConstraint',
+    Extends: Monitor.MonitorConstraint,
+
+    vfunc_update_allocation: function(actor, actorBox) {
+        let originalBox = actorBox.copy();
+        this.parent(actor, actorBox);
+
+        actorBox.init_rect(originalBox.get_x(), originalBox.get_y(),
+                           actorBox.get_width(), originalBox.get_height());
+    }
+});
+
 const ViewSelector = new Lang.Class({
     Name: 'ViewSelector',
 
-    _init : function(searchEntry, showAppsButton) {
-        this.actor = new Shell.Stack({ name: 'viewSelector' });
+    _init : function(showAppsButton) {
+        this.actor = new Shell.Stack({ name: 'viewSelector',
+                                       x_expand: true,
+                                       y_expand: true });
 
         this._showAppsButton = showAppsButton;
         this._showAppsButton.connect('notify::checked', Lang.bind(this, this._onShowAppsButtonToggled));
 
         this._activePage = null;
 
-        this._searchActive = false;
-
-        this._entry = searchEntry;
-        ShellEntry.addContextMenu(this._entry);
-
-        this._text = this._entry.clutter_text;
-        this._text.connect('text-changed', Lang.bind(this, this._onTextChanged));
-        this._text.connect('key-press-event', Lang.bind(this, this._onKeyPress));
-        this._text.connect('key-focus-in', Lang.bind(this, function() {
-            this._searchResults.highlightDefault(true);
-        }));
-        this._text.connect('key-focus-out', Lang.bind(this, function() {
-            this._searchResults.highlightDefault(false);
-        }));
-        this._entry.connect('notify::mapped', Lang.bind(this, this._onMapped));
-        global.stage.connect('notify::key-focus', Lang.bind(this, this._onStageKeyFocusChanged));
-
-        this._entry.set_primary_icon(new St.Icon({ style_class: 'search-entry-icon',
-                                                   icon_name: 'edit-find-symbolic' }));
-        this._clearIcon = new St.Icon({ style_class: 'search-entry-icon',
-                                        icon_name: 'edit-clear-symbolic' });
-
-        this._iconClickedId = 0;
-        this._capturedEventId = 0;
-
         this._workspacesDisplay = new WorkspacesView.WorkspacesDisplay();
+        this._workspacesDisplay.connect('empty-space-clicked', Lang.bind(this, this._onEmptySpaceClicked));
         this._workspacesPage = this._addPage(this._workspacesDisplay.actor,
                                              _("Windows"), 'focus-windows-symbolic');
 
-        this.appDisplay = new AppDisplay.AppDisplay();
-        this._appsPage = this._addPage(this.appDisplay.actor,
+        this._viewsDisplay = new ViewsDisplay();
+        this._appsPage = this._addPage(this._viewsDisplay.actor,
                                        _("Applications"), 'view-app-grid-symbolic');
+        this._appsPage.add_constraint(new ViewsDisplayConstraint({ primary: true,
+                                                                   work_area: true }));
+        this._entry = this._viewsDisplay.entry;
+        this._viewsDisplay.actor.connect('views-page-changed', Lang.bind(this, this._onViewsPageChanged));
 
-        this._searchResults = new Search.SearchResults();
-        this._searchPage = this._addPage(this._searchResults.actor,
-                                         _("Search"), 'edit-find-symbolic',
-                                         { a11yFocus: this._entry });
-
-        // Since the entry isn't inside the results container we install this
-        // dummy widget as the last results container child so that we can
-        // include the entry in the keynav tab path
-        this._focusTrap = new FocusTrap({ can_focus: true });
-        this._focusTrap.connect('key-focus-in', Lang.bind(this, function() {
-            this._entry.grab_key_focus();
-        }));
-        this._searchResults.actor.add_actor(this._focusTrap);
-
-        global.focus_manager.add_group(this._searchResults.actor);
+        this._addViewsPageClone();
 
         this._stageKeyPressId = 0;
-        Main.overview.connect('showing', Lang.bind(this,
-            function () {
-                this._stageKeyPressId = global.stage.connect('key-press-event',
-                                                             Lang.bind(this, this._onStageKeyPress));
-            }));
-        Main.overview.connect('hiding', Lang.bind(this,
-            function () {
-                if (this._stageKeyPressId != 0) {
-                    global.stage.disconnect(this._stageKeyPressId);
-                    this._stageKeyPressId = 0;
-                }
-            }));
-        Main.overview.connect('shown', Lang.bind(this,
-            function() {
-                // If we were animating from the desktop view to the
-                // apps page the workspace page was visible, allowing
-                // the windows to animate, but now we no longer want to
-                // show it given that we are now on the apps page or
-                // search page.
-                if (this._activePage != this._workspacesPage) {
-                    this._workspacesPage.opacity = 0;
-                    this._workspacesPage.hide();
-                }
-            }));
+    },
 
-        Main.wm.addKeybinding('toggle-application-view',
-                              new Gio.Settings({ schema_id: SHELL_KEYBINDINGS_SCHEMA }),
-                              Meta.KeyBindingFlags.NONE,
-                              Shell.ActionMode.NORMAL |
-                              Shell.ActionMode.OVERVIEW,
-                              Lang.bind(this, this._toggleAppsPage));
+    _addViewsPageClone: function() {
+        let layoutViewsClone = new ViewsClone(this, this._viewsDisplay, false);
+        Main.layoutManager.setViewsClone(layoutViewsClone);
 
-        Main.wm.addKeybinding('toggle-overview',
-                              new Gio.Settings({ schema_id: SHELL_KEYBINDINGS_SCHEMA }),
-                              Meta.KeyBindingFlags.NONE,
-                              Shell.ActionMode.NORMAL |
-                              Shell.ActionMode.OVERVIEW,
-                              Lang.bind(Main.overview, Main.overview.toggle));
+        this._overviewViewsClone = new ViewsClone(this, this._viewsDisplay, true);
+        Main.overview.setViewsClone(this._overviewViewsClone);
+        this._appsPage.bind_property('visible',
+                                     this._overviewViewsClone, 'visible',
+                                     GObject.BindingFlags.SYNC_CREATE |
+                                     GObject.BindingFlags.INVERT_BOOLEAN);
+    },
 
-        let side;
-        if (Clutter.get_default_text_direction() == Clutter.TextDirection.RTL)
-            side = St.Side.RIGHT;
-        else
-            side = St.Side.LEFT;
-        let gesture = new EdgeDragAction.EdgeDragAction(side,
-                                                        Shell.ActionMode.NORMAL);
-        gesture.connect('activated', Lang.bind(this, function() {
-            if (Main.overview.visible)
-                Main.overview.hide();
-            else
-                this.showApps();
-        }));
-        global.stage.add_action(gesture);
+    _onEmptySpaceClicked: function() {
+        this.setActivePage(ViewPage.APPS);
+    },
 
-        gesture = new ShowOverviewAction();
-        gesture.connect('activated', Lang.bind(this, function(action, areaDiff) {
-            if (areaDiff < 0.7)
-                Main.overview.show();
-        }));
-        global.stage.add_action(gesture);
+    _onViewsPageChanged: function() {
+        this.emit('views-page-changed');
+    },
+
+    _pageFromViewPage: function(viewPage) {
+        let page;
+
+        if (viewPage == ViewPage.WINDOWS) {
+            page = this._workspacesPage;
+        } else {
+            page = this._appsPage;
+        }
+
+        return page;
+    },
+
+    _viewPageFromPage: function(page) {
+        let viewPage;
+
+        if (page == this._workspacesPage) {
+            viewPage = ViewPage.WINDOWS;
+        } else {
+            viewPage = ViewPage.APPS;
+        }
+
+        return viewPage;
+    },
+
+    _clearSearch: function() {
+        this._entry.resetSearch();
+        this._viewsDisplay.actor.showPage(ViewsDisplayPage.APP_GRID, false);
+    },
+
+    show: function(viewPage) {
+        this._stageKeyPressId = global.stage.connect('key-press-event',
+                                                     Lang.bind(this, this._onStageKeyPress));
+
+        this._clearSearch();
+        this._workspacesDisplay.show(this._showAppsButton.checked);
+
+        this._showPage(this._pageFromViewPage(viewPage), true);
     },
 
     _toggleAppsPage: function() {
@@ -244,20 +575,7 @@ const ViewSelector = new Lang.Class({
 
     showApps: function() {
         this._showAppsButton.checked = true;
-        Main.overview.show();
-    },
-
-    show: function() {
-        this.reset();
-        this._workspacesDisplay.show(this._showAppsButton.checked);
-        this._activePage = null;
-        if (this._showAppsButton.checked)
-            this._showPage(this._appsPage);
-        else
-            this._showPage(this._workspacesPage);
-
-        if (!this._workspacesDisplay.activeWorkspaceHasMaximizedWindows())
-            Main.overview.fadeOutDesktop();
+        this.show(ViewPage.APPS);
     },
 
     animateFromOverview: function() {
@@ -268,9 +586,6 @@ const ViewSelector = new Lang.Class({
         this._workspacesDisplay.animateFromOverview(this._activePage != this._workspacesPage);
 
         this._showAppsButton.checked = false;
-
-        if (!this._workspacesDisplay.activeWorkspaceHasMaximizedWindows())
-            Main.overview.fadeInDesktop();
     },
 
     setWorkspacesFullGeometry: function(geom) {
@@ -281,10 +596,22 @@ const ViewSelector = new Lang.Class({
         this._workspacesDisplay.hide();
     },
 
+    focusSearch: function() {
+        if (this._activePage == this._appsPage) {
+            this._entry.grab_key_focus();
+        }
+    },
+
+    blinkSearch: function() {
+        this._entry.blink();
+    },
+
     _addPage: function(actor, name, a11yIcon, params) {
         params = Params.parse(params, { a11yFocus: null });
 
         let page = new St.Bin({ child: actor,
+                                opacity: 0,
+                                visible: false,
                                 x_align: St.Align.START,
                                 y_align: St.Align.START,
                                 x_fill: true,
@@ -304,27 +631,46 @@ const ViewSelector = new Lang.Class({
         return page;
     },
 
-    _fadePageIn: function() {
-        Tweener.addTween(this._activePage,
-                         { opacity: 255,
-                           time: OverviewControls.SIDE_CONTROLS_ANIMATION_TIME,
-                           transition: 'easeOutQuad'
-                         });
+    _pageChanged: function() {
+        if (this._activePage == this._appsPage) {
+            this._showAppsButton.checked = true;
+        } else {
+            this._clearSearch();
+            this._showAppsButton.checked = false;
+        }
+
+        this.emit('page-changed');
     },
 
-    _fadePageOut: function(page) {
-        let oldPage = page;
-        Tweener.addTween(page,
-                         { opacity: 0,
-                           time: OverviewControls.SIDE_CONTROLS_ANIMATION_TIME,
-                           transition: 'easeOutQuad',
-                           onComplete: Lang.bind(this, function() {
-                               this._animateIn(oldPage);
-                           })
-                         });
+    _fadePageIn: function(noFade) {
+        if (noFade) {
+            this._activePage.opacity = 255;
+        } else {
+            Tweener.addTween(this._activePage,
+                             { opacity: 255,
+                               time: OverviewControls.SIDE_CONTROLS_ANIMATION_TIME,
+                               transition: 'easeOutQuad'
+                             });
+        }
     },
 
-    _animateIn: function(oldPage) {
+    _fadePageOut: function(page, noFade) {
+        if (noFade) {
+            this._activePage.opacity = 0;
+        } else {
+            let oldPage = page;
+            Tweener.addTween(page,
+                             { opacity: 0,
+                               time: OverviewControls.SIDE_CONTROLS_ANIMATION_TIME,
+                               transition: 'easeOutQuad',
+                               onComplete: Lang.bind(this, function() {
+                                   this._animateIn(oldPage, noFade);
+                               })
+                             });
+        }
+    },
+
+    _animateIn: function(oldPage, noFade) {
         if (oldPage)
             oldPage.hide();
 
@@ -335,27 +681,22 @@ const ViewSelector = new Lang.Class({
         if (this._activePage == this._appsPage && oldPage == this._workspacesPage) {
             // Restore opacity, in case we animated via _fadePageOut
             this._activePage.opacity = 255;
-            this.appDisplay.animate(IconGrid.AnimationDirection.IN);
         } else {
-            this._fadePageIn();
+            this._fadePageIn(noFade);
         }
     },
 
-    _animateOut: function(page) {
+    _animateOut: function(page, noFade) {
         let oldPage = page;
         if (page == this._appsPage &&
             this._activePage == this._workspacesPage &&
             !Main.overview.animationInProgress) {
-            this.appDisplay.animate(IconGrid.AnimationDirection.OUT, Lang.bind(this,
-                function() {
-                    this._animateIn(oldPage)
-                }));
         } else {
-            this._fadePageOut(page);
+            this._fadePageOut(page, noFade);
         }
     },
 
-    _showPage: function(page) {
+    _showPage: function(page, noFade) {
         if (!Main.overview.visible)
             return;
 
@@ -364,12 +705,45 @@ const ViewSelector = new Lang.Class({
 
         let oldPage = this._activePage;
         this._activePage = page;
-        this.emit('page-changed');
+        this._pageChanged();
 
-        if (oldPage)
-            this._animateOut(oldPage)
-        else
-            this._animateIn();
+        if (oldPage && !noFade) {
+            // When fading to the apps page, tween the opacity of the
+            // clone instead, and set the apps page to full solid immediately
+            if (page == this._appsPage) {
+                page.opacity = 255;
+                this._overviewViewsClone.opacity = AppDisplay.EOS_INACTIVE_GRID_OPACITY;
+                this._overviewViewsClone.saturation = AppDisplay.EOS_INACTIVE_GRID_SATURATION;
+                Tweener.addTween(this._overviewViewsClone,
+                                 { opacity: AppDisplay.EOS_ACTIVE_GRID_OPACITY,
+                                   saturation: AppDisplay.EOS_ACTIVE_GRID_SATURATION,
+                                   time: OverviewControls.SIDE_CONTROLS_ANIMATION_TIME,
+                                   transition: 'easeOutQuad',
+                                   onComplete: function() {
+                                       this._overviewViewsClone.opacity = AppDisplay.EOS_INACTIVE_GRID_OPACITY;
+                                       this._overviewViewsClone.saturation = AppDisplay.EOS_INACTIVE_GRID_SATURATION;
+                                   },
+                                   onCompleteScope: this });
+            }
+
+            // When fading from the apps page, tween the opacity of the
+            // clone instead. The code in this._fadePageIn() will hide
+            // the actual page immediately
+            if (oldPage == this._appsPage) {
+                this._overviewViewsClone.opacity = AppDisplay.EOS_ACTIVE_GRID_OPACITY;
+                this._overviewViewsClone.saturation = AppDisplay.EOS_ACTIVE_GRID_SATURATION;
+                Tweener.addTween(this._overviewViewsClone,
+                                 { opacity: AppDisplay.EOS_INACTIVE_GRID_OPACITY,
+                                   saturation: AppDisplay.EOS_INACTIVE_GRID_SATURATION,
+                                   time: OverviewControls.SIDE_CONTROLS_ANIMATION_TIME,
+                                   transition: 'easeOutQuad' });
+                this._animateIn(oldPage, noFade);
+            } else {
+                this._animateOut(oldPage, noFade)
+            }
+        } else {
+            this._animateIn(oldPage, noFade);
+        }
     },
 
     _a11yFocusPage: function(page) {
@@ -378,8 +752,11 @@ const ViewSelector = new Lang.Class({
     },
 
     _onShowAppsButtonToggled: function() {
-        this._showPage(this._showAppsButton.checked ?
-                       this._appsPage : this._workspacesPage);
+        if (this._showAppsButton.checked) {
+            this.setActivePage(ViewPage.APPS);
+        } else {
+            this.setActivePage(ViewPage.WINDOWS);
+        }
     },
 
     _onStageKeyPress: function(actor, event) {
@@ -388,200 +765,43 @@ const ViewSelector = new Lang.Class({
         if (Main.modalCount > 1)
             return Clutter.EVENT_PROPAGATE;
 
-        let modifiers = event.get_state();
         let symbol = event.get_key_symbol();
 
-        if (symbol == Clutter.Escape) {
-            if (this._searchActive)
-                this.reset();
-            else if (this._showAppsButton.checked)
-                this._showAppsButton.checked = false;
-            else
-                Main.overview.hide();
+        if (this._activePage == this._workspacesPage) {
+            if (symbol == Clutter.Escape) {
+                Main.overview.toggleWindows();
+                return Clutter.EVENT_STOP;
+            }
+            return Clutter.EVENT_PROPAGATE;
+        }
+
+        if (this._entry.handleStageEvent(event))
             return Clutter.EVENT_STOP;
-        } else if (this._shouldTriggerSearch(symbol)) {
-            this.startSearch(event);
-        } else if (!this._searchActive && !global.stage.key_focus) {
-            if (symbol == Clutter.Tab || symbol == Clutter.Down) {
-                this._activePage.navigate_focus(null, Gtk.DirectionType.TAB_FORWARD, false);
-                return Clutter.EVENT_STOP;
-            } else if (symbol == Clutter.ISO_Left_Tab) {
-                this._activePage.navigate_focus(null, Gtk.DirectionType.TAB_BACKWARD, false);
-                return Clutter.EVENT_STOP;
-            }
-        }
-        return Clutter.EVENT_PROPAGATE;
-    },
 
-    _searchCancelled: function() {
-        this._showPage(this._showAppsButton.checked ? this._appsPage
-                                                    : this._workspacesPage);
+        if (this._entry.active)
+            return Clutter.EVENT_PROPAGATE;
 
-        // Leave the entry focused when it doesn't have any text;
-        // when replacing a selected search term, Clutter emits
-        // two 'text-changed' signals, one for deleting the previous
-        // text and one for the new one - the second one is handled
-        // incorrectly when we remove focus
-        // (https://bugzilla.gnome.org/show_bug.cgi?id=636341) */
-        if (this._text.text != '')
-            this.reset();
-    },
-
-    reset: function () {
-        global.stage.set_key_focus(null);
-
-        this._entry.text = '';
-
-        this._text.set_cursor_visible(true);
-        this._text.set_selection(0, 0);
-    },
-
-    _onStageKeyFocusChanged: function() {
-        let focus = global.stage.get_key_focus();
-        let appearFocused = (this._entry.contains(focus) ||
-                             this._searchResults.actor.contains(focus));
-
-        this._text.set_cursor_visible(appearFocused);
-
-        if (appearFocused)
-            this._entry.add_style_pseudo_class('focus');
-        else
-            this._entry.remove_style_pseudo_class('focus');
-    },
-
-    _onMapped: function() {
-        if (this._entry.mapped) {
-            // Enable 'find-as-you-type'
-            this._capturedEventId = global.stage.connect('captured-event',
-                                 Lang.bind(this, this._onCapturedEvent));
-            this._text.set_cursor_visible(true);
-            this._text.set_selection(0, 0);
-        } else {
-            // Disable 'find-as-you-type'
-            if (this._capturedEventId > 0)
-                global.stage.disconnect(this._capturedEventId);
-            this._capturedEventId = 0;
-        }
-    },
-
-    _shouldTriggerSearch: function(symbol) {
-        if (symbol == Clutter.Multi_key)
-            return true;
-
-        if (symbol == Clutter.BackSpace && this._searchActive)
-            return true;
-
-        let unicode = Clutter.keysym_to_unicode(symbol);
-        if (unicode == 0)
-            return false;
-
-        if (getTermsForSearchString(String.fromCharCode(unicode)).length > 0)
-            return true;
-
-        return false;
-    },
-
-    startSearch: function(event) {
-        global.stage.set_key_focus(this._text);
-
-        let synthEvent = event.copy();
-        synthEvent.set_source(this._text);
-        this._text.event(synthEvent, true);
-    },
-
-    // the entry does not show the hint
-    _isActivated: function() {
-        return this._text.text == this._entry.get_text();
-    },
-
-    _onTextChanged: function (se, prop) {
-        let terms = getTermsForSearchString(this._entry.get_text());
-
-        this._searchActive = (terms.length > 0);
-        this._searchResults.setTerms(terms);
-
-        if (this._searchActive) {
-            this._showPage(this._searchPage);
-
-            this._entry.set_secondary_icon(this._clearIcon);
-
-            if (this._iconClickedId == 0)
-                this._iconClickedId = this._entry.connect('secondary-icon-clicked',
-                    Lang.bind(this, this.reset));
-        } else {
-            if (this._iconClickedId > 0) {
-                this._entry.disconnect(this._iconClickedId);
-                this._iconClickedId = 0;
-            }
-
-            this._entry.set_secondary_icon(null);
-            this._searchCancelled();
-        }
-    },
-
-    _onKeyPress: function(entry, event) {
-        let symbol = event.get_key_symbol();
-        if (symbol == Clutter.Escape) {
-            if (this._isActivated()) {
-                this.reset();
-                return Clutter.EVENT_STOP;
-            }
-        } else if (this._searchActive) {
-            let arrowNext, nextDirection;
-            if (entry.get_text_direction() == Clutter.TextDirection.RTL) {
-                arrowNext = Clutter.Left;
-                nextDirection = Gtk.DirectionType.LEFT;
-            } else {
-                arrowNext = Clutter.Right;
-                nextDirection = Gtk.DirectionType.RIGHT;
-            }
-
-            if (symbol == Clutter.Tab) {
-                this._searchResults.navigateFocus(Gtk.DirectionType.TAB_FORWARD);
-                return Clutter.EVENT_STOP;
-            } else if (symbol == Clutter.ISO_Left_Tab) {
-                this._focusTrap.can_focus = false;
-                this._searchResults.navigateFocus(Gtk.DirectionType.TAB_BACKWARD);
-                this._focusTrap.can_focus = true;
-                return Clutter.EVENT_STOP;
-            } else if (symbol == Clutter.Down) {
-                this._searchResults.navigateFocus(Gtk.DirectionType.DOWN);
-                return Clutter.EVENT_STOP;
-            } else if (symbol == arrowNext && this._text.position == -1) {
-                this._searchResults.navigateFocus(nextDirection);
-                return Clutter.EVENT_STOP;
-            } else if (symbol == Clutter.Return || symbol == Clutter.KP_Enter) {
-                this._searchResults.activateDefault();
-                return Clutter.EVENT_STOP;
-            }
-        }
-        return Clutter.EVENT_PROPAGATE;
-    },
-
-    _onCapturedEvent: function(actor, event) {
-        if (event.type() == Clutter.EventType.BUTTON_PRESS) {
-            let source = event.get_source();
-            if (source != this._text &&
-                this._text.text == '' &&
-                !this._text.has_preedit () &&
-                !Main.layoutManager.keyboardBox.contains(source)) {
-                // the user clicked outside after activating the entry, but
-                // with no search term entered and no keyboard button pressed
-                // - cancel the search
-                this.reset();
-            }
+        if (symbol == Clutter.Tab || symbol == Clutter.Down) {
+            this._activePage.navigate_focus(null, Gtk.DirectionType.TAB_FORWARD, false);
+            return Clutter.EVENT_STOP;
+        } else if (symbol == Clutter.ISO_Left_Tab) {
+            this._activePage.navigate_focus(null, Gtk.DirectionType.TAB_BACKWARD, false);
+            return Clutter.EVENT_STOP;
         }
 
         return Clutter.EVENT_PROPAGATE;
+    },
+
+    getActiveViewsPage: function() {
+        return this._viewsDisplay.activeViewsPage;
     },
 
     getActivePage: function() {
-        if (this._activePage == this._workspacesPage)
-            return ViewPage.WINDOWS;
-        else if (this._activePage == this._appsPage)
-            return ViewPage.APPS;
-        else
-            return ViewPage.SEARCH;
+        return this._viewPageFromPage(this._activePage);
+    },
+
+    setActivePage: function(viewPage) {
+        this._showPage(this._pageFromViewPage(viewPage));
     },
 
     fadeIn: function() {
