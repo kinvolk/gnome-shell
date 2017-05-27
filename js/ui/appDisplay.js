@@ -66,6 +66,12 @@ const VIEWS_SWITCH_ANIMATION_DELAY = 0.1;
 
 const EOS_LINK_PREFIX = 'eos-link-';
 
+const EOS_INACTIVE_GRID_OPACITY = 96;
+const EOS_ACTIVE_GRID_OPACITY = 255;
+
+const EOS_INACTIVE_GRID_SATURATION = 1;
+const EOS_ACTIVE_GRID_SATURATION = 0;
+
 
 function _getCategories(info) {
     let categoriesStr = info.get_categories();

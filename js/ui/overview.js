@@ -11,6 +11,7 @@ const St = imports.gi.St;
 const Shell = imports.gi.Shell;
 const Gdk = imports.gi.Gdk;
 
+const AppDisplay = imports.ui.appDisplay;
 const Background = imports.ui.background;
 const DND = imports.ui.dnd;
 const Monitor = imports.ui.monitor;
@@ -21,6 +22,7 @@ const OverviewControls = imports.ui.overviewControls;
 const Panel = imports.ui.panel;
 const Params = imports.misc.params;
 const Tweener = imports.ui.tweener;
+const ViewSelector = imports.ui.viewSelector;
 const WorkspaceThumbnail = imports.ui.workspaceThumbnail;
 
 // Time for initial animation going into Overview mode
@@ -115,6 +117,12 @@ const Overview = new Lang.Class({
         this._overview.add_constraint(new Monitor.MonitorConstraint({ primary: true }));
         this._overview._delegate = this;
 
+        // this effect takes care of animating the saturation when entering
+        // or leaving the overview
+        this._overviewSaturation = new Clutter.DesaturateEffect({ factor: AppDisplay.EOS_ACTIVE_GRID_SATURATION,
+                                                                  enabled: false });
+        this._overview.add_effect(this._overviewSaturation);
+
         // The main Background actors are inside global.window_group which are
         // hidden when displaying the overview, so we create a new
         // one. Instances of this class share a single CoglTexture behind the
@@ -123,6 +131,7 @@ const Overview = new Lang.Class({
         this._backgroundGroup = new Meta.BackgroundGroup({ reactive: true });
         Main.layoutManager.overviewGroup.add_child(this._backgroundGroup);
         this._bgManagers = [];
+        this._viewsClone = null;
 
         this._desktopFade = new St.Widget();
         Main.layoutManager.overviewGroup.add_child(this._desktopFade);
@@ -132,8 +141,11 @@ const Overview = new Lang.Class({
         this.visible = false;           // animating to overview, in overview, animating out
         this._shown = false;            // show() and not hide()
         this._modal = false;            // have a modal grab
+        this._toggleToHidden = false;   // Whether to hide the overview when either toggle function is called
+        this._targetPage = null;        // do we have a target page to animate to?
         this.animationInProgress = false;
         this.visibleTarget = false;
+        this.opacityPrepared = false;
 
         // During transitions, we raise this to the top to avoid having the overview
         // area be reactive; it causes too many issues such as double clicks on
@@ -183,10 +195,19 @@ const Overview = new Lang.Class({
         }
     },
 
+    setViewsClone: function(actor) {
+        this._viewsClone = actor;
+        this._backgroundGroup.add_child(this._viewsClone);
+    },
+
     _unshadeBackgrounds: function() {
         let backgrounds = this._backgroundGroup.get_children();
         for (let i = 0; i < backgrounds.length; i++) {
-            Tweener.addTween(backgrounds[i],
+            let child = backgrounds[i];
+            if (child == this._viewsClone)
+                continue;
+
+            Tweener.addTween(child,
                              { brightness: 1.0,
                                time: SHADE_ANIMATION_TIME,
                                transition: 'easeOutQuad'
@@ -197,7 +218,11 @@ const Overview = new Lang.Class({
     _shadeBackgrounds: function() {
         let backgrounds = this._backgroundGroup.get_children();
         for (let i = 0; i < backgrounds.length; i++) {
-            Tweener.addTween(backgrounds[i],
+            let child = backgrounds[i];
+            if (child == this._viewsClone)
+                continue;
+
+            Tweener.addTween(child,
                              { brightness: Lightbox.VIGNETTE_BRIGHTNESS,
                                time: SHADE_ANIMATION_TIME,
                                transition: 'easeOutQuad'
@@ -256,8 +281,39 @@ const Overview = new Lang.Class({
                                this.dashIconSize = this._dash.iconSize;
                            }));
 
+        this.viewSelector.connect('page-changed', Lang.bind(this, this._onPageChanged));
+        this.viewSelector.connect('views-page-changed', Lang.bind(this, this._onViewsPageChanged));
+
+        // clicking the desktop displays the app grid
+        Main.layoutManager.connect('background-clicked', Lang.bind(this, this.showApps));
+
+        Main.layoutManager.connect('startup-prepared', Lang.bind(this, this._onStartupPrepared));
         Main.layoutManager.connect('monitors-changed', Lang.bind(this, this._relayout));
-        this._relayout();
+        global.screen.connect('workareas-changed', Lang.bind(this, this._relayoutNoHide));
+        this._relayoutNoHide();
+    },
+
+    _updateBackgroundShade: function() {
+        if (this.visibleTarget &&
+            (this.viewSelector.getActivePage() == ViewSelector.ViewPage.WINDOWS ||
+             this.viewSelector.getActiveViewsPage() == ViewSelector.ViewsDisplayPage.SEARCH)) {
+            this._shadeBackgrounds();
+        } else {
+            this._unshadeBackgrounds();
+        }
+    },
+
+    _onPageChanged: function() {
+        // We are switching a pages in the overview, so we should toggle to the
+        // other page rather than hiding the overview.
+        this._toggleToHidden = false;
+
+        this.emit('page-changed');
+        this._updateBackgroundShade();
+    },
+
+    _onViewsPageChanged: function() {
+        this._updateBackgroundShade();
     },
 
     addSearchProvider: function(provider) {
@@ -389,6 +445,10 @@ const Overview = new Lang.Class({
         // when it is next shown.
         this.hide();
 
+        this._relayoutNoHide();
+    },
+
+    _relayoutNoHide: function() {
         let workArea = Main.layoutManager.getWorkAreaForMonitor(Main.layoutManager.primaryIndex);
 
         this._coverPane.set_position(0, workArea.y);
@@ -438,8 +498,8 @@ const Overview = new Lang.Class({
     },
 
     focusSearch: function() {
-        this.show();
-        this._searchEntry.grab_key_focus();
+        this.showApps();
+        this.viewSelector.focusSearch();
     },
 
     fadeInDesktop: function() {
@@ -531,6 +591,50 @@ const Overview = new Lang.Class({
         this._animateVisible();
     },
 
+    _showOrSwitchPage: function(page) {
+        if (this.visible) {
+            this.viewSelector.setActivePage(page);
+        } else {
+            this._targetPage = page;
+            this.show();
+        }
+    },
+
+    _isInitialSetupRunning: function() {
+        let path = GLib.build_filenamev([GLib.get_user_config_dir(),
+                                         'gnome-initial-setup-done']);
+        return !GLib.file_test(path, GLib.FileTest.EXISTS);
+    },
+
+    _onStartupPrepared: function() {
+        if (this.isDummy)
+            return;
+
+        // do not show overview when FBE is running
+        if (this._isInitialSetupRunning()) {
+            this.viewSelector.setActivePage(ViewSelector.ViewPage.APPS);
+        } else {
+            this._showOrSwitchPage(ViewSelector.ViewPage.APPS);
+        }
+    },
+
+    showApps: function() {
+        if (this.isDummy)
+            return;
+
+        this._showOrSwitchPage(ViewSelector.ViewPage.APPS);
+    },
+
+    showWindows: function() {
+        if (this.isDummy)
+            return;
+
+        this._showOrSwitchPage(ViewSelector.ViewPage.WINDOWS);
+    },
+
+    getActivePage: function() {
+        return this.viewSelector.getActivePage();
+    },
 
     _animateVisible: function() {
         if (this.visible || this.animationInProgress)
@@ -541,12 +645,59 @@ const Overview = new Lang.Class({
         this.visibleTarget = true;
         this._activationTime = Date.now() / 1000;
 
+        this._updateBackgroundShade();
+
         Meta.disable_unredirect_for_screen(global.screen);
-        this.viewSelector.show();
+
+        if (!this._targetPage)
+            this._targetPage = ViewSelector.ViewPage.WINDOWS;
+
+        this.viewSelector.show(this._targetPage);
+        this._targetPage = null;
+
+        // Since the overview is just becoming visible, we should toggle back
+        // the hidden state
+        this._toggleToHidden = true;
 
         this._coverPane.raise_top();
         this._coverPane.show();
         this.emit('showing');
+
+        if (Main.layoutManager.startingUp || this.opacityPrepared) {
+            this._overview.opacity = AppDisplay.EOS_ACTIVE_GRID_OPACITY;
+            this.opacityPrepared = false;
+            this._showDone();
+            return;
+        }
+
+        let saturationTarget = AppDisplay.EOS_INACTIVE_GRID_SATURATION;
+        this._overviewSaturation.factor = AppDisplay.EOS_INACTIVE_GRID_SATURATION;
+        this._overviewSaturation.enabled = true;
+
+        if (this.viewSelector.getActivePage() == ViewSelector.ViewPage.APPS) {
+            this._overview.opacity = AppDisplay.EOS_INACTIVE_GRID_OPACITY;
+            saturationTarget = AppDisplay.EOS_ACTIVE_GRID_SATURATION;
+        } else {
+            this._overview.opacity = 0;
+        }
+
+        Tweener.addTween(this._overview,
+                         { opacity: AppDisplay.EOS_ACTIVE_GRID_OPACITY,
+                           transition: 'easeOutQuad',
+                           time: ANIMATION_TIME,
+                           onComplete: this._showDone,
+                           onCompleteScope: this
+                         });
+
+        Tweener.addTween(this._overviewSaturation,
+                         { factor: saturationTarget,
+                           transition: 'easeOutQuad',
+                           time: ANIMATION_TIME,
+                           onComplete: function() {
+                               this._overviewSaturation.enabled = false;
+                           },
+                           onCompleteScope: this
+                         });
     },
 
     _showDone: function() {
@@ -649,6 +800,52 @@ const Overview = new Lang.Class({
             this.hide();
         else
             this.show();
+    },
+
+    toggleApps: function() {
+        if (this.isDummy)
+            return;
+
+        if (!this.visible ||
+            this.viewSelector.getActivePage() !== ViewSelector.ViewPage.APPS) {
+            this.showApps();
+            return;
+        }
+
+        if (!this._toggleToHidden) {
+            this.showWindows();
+            return;
+        }
+
+        if (!Main.workspaceMonitor.hasVisibleWindows) {
+            this.viewSelector.blinkSearch();
+            return;
+        }
+
+        this.hide();
+    },
+
+    toggleWindows: function() {
+        if (this.isDummy)
+            return;
+
+        if (!this.visible ||
+            this.viewSelector.getActivePage() !== ViewSelector.ViewPage.WINDOWS) {
+            this.showWindows();
+            return;
+        }
+
+        if (!this._toggleToHidden) {
+            this.showApps();
+            return;
+        }
+
+        if (!Main.workspaceMonitor.hasVisibleWindows) {
+            this.showApps();
+            return;
+        }
+
+        this.hide();
     },
 
     getShowAppsButton: function() {
