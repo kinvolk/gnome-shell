@@ -51,14 +51,47 @@ const ViewsDisplayPage = {
     SEARCH: 2,
 };
 
+/** DiscoveryFeedButton:
+ *
+ * This class handles the button to launch the discovery feed application
+ */
+const DiscoveryFeedButton = new Lang.Class({
+    Name: 'DiscoveryFeedButton',
+    Extends: St.Button,
+
+    _init: function() {
+        let iconFile = Gio.File.new_for_uri('resource:///org/gnome/shell/theme/discovery-feed-open-tab.png');
+        let gicon = new Gio.FileIcon({ file: iconFile });
+        this._icon = new St.Icon({ gicon: gicon,
+                                   style_class: 'discovery-feed-icon',
+                                   track_hover: true });
+        this.parent({ name: 'discovery-feed',
+                      child: this._icon,
+                      x_align: Clutter.ActorAlign.CENTER,
+                      y_align: Clutter.ActorAlign.CENTER });
+    }
+});
+
+function allocateDiscoveryFeedButtonToBox(discoveryFeedButton, box, availWidth, flags) {
+    let discoveryFeedButtonHeight = discoveryFeedButton.get_preferred_height(availWidth)[1];
+    let discoveryFeedButtonBox = box.copy();
+    let x1 = (availWidth - discoveryFeedButton.get_width()) * 0.5;
+    discoveryFeedButtonBox.y1 = 0;
+    discoveryFeedButtonBox.y2 = discoveryFeedButtonBox.y1 + discoveryFeedButtonHeight;
+    discoveryFeedButtonBox.x1 = x1;
+    discoveryFeedButtonBox.x2 = x1 + discoveryFeedButton.get_width();
+    discoveryFeedButton.allocate(discoveryFeedButtonBox, flags);
+}
+
 const ViewsDisplayLayout = new Lang.Class({
     Name: 'ViewsDisplayLayout',
     Extends: Clutter.BinLayout,
 
-    _init: function(entry, allViewActor, searchResultsActor) {
+    _init: function(entry, discoveryFeedButton, allViewActor, searchResultsActor) {
         this.parent();
 
         this._entry = entry;
+        this._discoveryFeedButton = discoveryFeedButton;
         this._allViewActor = allViewActor;
         this._searchResultsActor = searchResultsActor;
 
@@ -81,6 +114,11 @@ const ViewsDisplayLayout = new Lang.Class({
 
         this._allViewActor.visible = v != 1;
         this._searchResultsActor.visible = v != 0;
+
+        if (this._discoveryFeedButton !== null) {
+            this._discoveryFeedButton.visible = v != 1;
+            this._discoveryFeedButton.opacity = (1 - v) * 255;
+        }
 
         this._allViewActor.opacity = (1 - v) * 255;
         this._searchResultsActor.opacity = v * 255;
@@ -132,6 +170,12 @@ const ViewsDisplayLayout = new Lang.Class({
         let heightAboveGrid = this._calcAllViewPlacement(allViewHeight, entryHeight, availHeight);
         this._heightAboveEntry = this._centeredHeightAbove(entryHeight, heightAboveGrid);
 
+        if (this._discoveryFeedButton !== null)
+            allocateDiscoveryFeedButtonToBox(this._discoveryFeedButton,
+                                             box,
+                                             availWidth,
+                                             flags);
+
         let entryBox = box.copy();
         entryBox.y1 = this._heightAboveEntry + entryTopMargin;
         entryBox.y2 = entryBox.y1 + entryHeight;
@@ -160,19 +204,25 @@ const ViewsDisplayContainer = new Lang.Class({
         'views-page-changed': { }
     },
 
-    _init: function(entry, allView, searchResults) {
+    _init: function(entry, discoveryFeedButton, allView, searchResults) {
         this._activePage = null;
 
         this._entry = entry;
+        this._discoveryFeedButton = discoveryFeedButton;
         this._allView = allView;
         this._searchResults = searchResults;
 
-        let layoutManager = new ViewsDisplayLayout(entry, allView.actor, searchResults.actor);
+        let layoutManager = new ViewsDisplayLayout(entry,
+                                                   discoveryFeedButton,
+                                                   allView.actor,
+                                                   searchResults.actor);
         this.parent({ layout_manager: layoutManager,
                       x_expand: true,
                       y_expand: true });
 
         this.add_actor(this._entry);
+        if (this._discoveryFeedButton !== null)
+            this.add_actor(this._discoveryFeedButton);
         this.add_actor(this._allView.actor);
         this.add_actor(this._searchResults.actor);
 
@@ -221,12 +271,37 @@ const FocusTrap = new Lang.Class({
     }
 });
 
+function checkIfDiscoveryFeedEnabled() {
+    let supportedLanguages = global.settings.get_value('discovery-feed-languages').deep_unpack();
+    let systemLanguages = GLib.get_language_names();
+
+    let isEnabled = supportedLanguages.some(function(lang) {
+        return systemLanguages.indexOf(lang) !== -1;
+    }).length;
+
+    return isEnabled;
+}
+
+function maybeCreateDiscoveryFeed() {
+    if (checkIfDiscoveryFeedEnabled()) {
+        let discoveryFeedButton = new DiscoveryFeedButton();
+        discoveryFeedButton.connect('clicked', Lang.bind(this, function() {
+            Main.discoveryFeed.show(global.get_current_time());
+        }));
+
+        return discoveryFeedButton;
+    }
+
+    return null;
+}
+
 const ViewsDisplay = new Lang.Class({
     Name: 'ViewsDisplay',
 
     _init: function() {
         this._enterSearchTimeoutId = 0;
         this._localSearchMetricTimeoutId = 0;
+        this.discoveryFeed = maybeCreateDiscoveryFeed();;
 
         this._allView = new AppDisplay.AppDisplay();
 
@@ -264,7 +339,7 @@ const ViewsDisplay = new Lang.Class({
         Main.overview.addAction(clickAction, false);
         this._searchResults.actor.bind_property('mapped', clickAction, 'enabled', GObject.BindingFlags.SYNC_CREATE);
 
-        this.actor = new ViewsDisplayContainer(this.entry, this._allView, this._searchResults);
+        this.actor = new ViewsDisplayContainer(this.entry, this.discoveryFeed, this._allView, this._searchResults);
     },
 
     _recordDesktopSearchMetric: function (query, searchProvider) {
@@ -426,6 +501,16 @@ const ShowOverviewAction = new Lang.Class({
     }
 });
 
+function maybeCreateInactiveDiscoveryFeedButton() {
+    if (checkIfDiscoveryFeedEnabled()) {
+        let discoveryFeed = new DiscoveryFeedButton();
+        discoveryFeed.reactive = false;
+        return discoveryFeed;
+    }
+
+    return null;
+}
+
 const ViewsClone = new Lang.Class({
     Name: 'ViewsClone',
     Extends: St.Widget,
@@ -447,7 +532,11 @@ const ViewsClone = new Lang.Class({
         let appGridContainer = new AppDisplay.AllViewContainer(iconGridClone);
         appGridContainer.reactive = false;
 
-        let layoutManager = new ViewsDisplayLayout(entry, appGridContainer, null);
+        let discoveryFeed = maybeCreateInactiveDiscoveryFeedButton();
+        let layoutManager = new ViewsDisplayLayout(entry,
+                                                   discoveryFeed,
+                                                   appGridContainer,
+                                                   null);
         this.parent({ layout_manager: layoutManager,
                       x_expand: true,
                       y_expand: true,
@@ -456,6 +545,9 @@ const ViewsClone = new Lang.Class({
         this._saturation = new Clutter.DesaturateEffect({ factor: AppDisplay.EOS_INACTIVE_GRID_SATURATION,
                                                           enabled: false });
         iconGridClone.add_effect(this._saturation);
+
+        if (discoveryFeed)
+            this.add_child(discoveryFeed);
 
         this.add_child(entry);
         this.add_child(appGridContainer);

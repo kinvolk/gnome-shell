@@ -1852,6 +1852,11 @@ StScrollBar {
 
 /* Endless-specific overrides below this point */
 
+.discovery-feed-icon {
+  width: 44px;
+  height: 23px;
+}
+
 .force-app-exit-dialog {
     max-height: 500px;
     min-height: 450px;
