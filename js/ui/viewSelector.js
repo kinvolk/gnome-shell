@@ -156,6 +156,34 @@ const ViewsDisplayLayout = new Lang.Class({
         this.layout_changed();
     },
 
+    vfunc_allocate: function(container, box, flags) {
+        let availWidth = box.x2 - box.x1;
+        let availHeight = box.y2 - box.y1;
+
+        log("availWidth: " + availWidth)
+        log("availHeight: " + availHeight)
+
+        let appDisplayBox = box.copy();
+        let width = this._appDisplayActor.get_preferred_width(availHeight)[1];
+        let height = this._appDisplayActor.get_preferred_height(availWidth)[1];
+
+        appDisplayBox.x2 = appDisplayBox.x1 + width;
+        appDisplayBox.y2 = appDisplayBox.y1 + height;
+
+        log("-------------------")
+        log("AppDisplay allocation:")
+        log("Preferred Width: " + width);
+        log("Preferred Height: " + height);
+        log("  x: " + appDisplayBox.x1 + " / y: " + appDisplayBox.y1);
+        log("  width: " + (appDisplayBox.x2 - appDisplayBox.x1) + " / "
+            + "height: " + (appDisplayBox.y2 - appDisplayBox.y1));
+        log("-------------------")
+        log("")
+
+        this._appDisplayActor.style = 'border: 1px solid red;'
+        this._appDisplayActor.allocate(appDisplayBox, flags);
+    },
+
     set searchResultsTween(v) {
         if (v == this._searchResultsTween || this._searchResultsActor == null)
             return;
