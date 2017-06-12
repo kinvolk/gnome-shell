@@ -514,7 +514,10 @@ const IconGrid = new Lang.Class({
     },
 
     rowsForHeight: function(forHeight) {
-        return Math.floor((forHeight - (this.topPadding + this.bottomPadding) + this._getSpacing()) / (this._getVItemSize() + this._getSpacing()));
+        let result = Math.max(1, Math.floor((forHeight - (this.topPadding + this.bottomPadding) + this._getSpacing()) / (this._getVItemSize() + this._getSpacing())));
+        log("rowsForHeight(" + forHeight + "): " + result)
+        // print(new Error().stack)
+        return result;
     },
 
     usedHeightForNRows: function(nRows) {
@@ -621,7 +624,6 @@ const IconGrid = new Lang.Class({
         this._fixedHItemSize = this._hItemSize;
         this._fixedVItemSize = this._vItemSize;
         this._updateSpacingForSize(availWidth, availHeight);
-        let spacing = this._getSpacing();
     }
 });
 Signals.addSignalMethods(IconGrid.prototype);
@@ -640,8 +642,13 @@ const PaginatedIconGrid = new Lang.Class({
     },
 
     _getPreferredHeight: function (grid, forWidth, alloc) {
+        log("_getPreferredHeight(" + forWidth + ")")
         alloc.min_size = (this._availableHeightPerPageForItems() + this.bottomPadding + this.topPadding) * this._nPages + this._spaceBetweenPages * this._nPages;
         alloc.natural_size = (this._availableHeightPerPageForItems() + this.bottomPadding + this.topPadding) * this._nPages + this._spaceBetweenPages * this._nPages;
+
+        log("this._availableHeightPerPageForItems(): " + this._availableHeightPerPageForItems())
+        log("alloc.natural_size: " + alloc.natural_size)
+
     },
 
     _allocate: function (grid, box, flags) {
@@ -707,6 +714,7 @@ const PaginatedIconGrid = new Lang.Class({
     },
 
     _computePages: function (availWidthPerPage, availHeightPerPage) {
+        log("_computePages(" + availWidthPerPage + ", " + availHeightPerPage + ")")
         let [nColumns, usedWidth] = this._computeLayout(availWidthPerPage);
         let nRows;
         let children = this._getVisibleChildren();
@@ -719,9 +727,21 @@ const PaginatedIconGrid = new Lang.Class({
 
         let spacing = this._getSpacing();
         // We want to contain the grid inside the parent box with padding
+
+        log("")
+        log("---")
+        log("_computePages");
+        log("nRows: " + nRows)
+        log("availWidthPerPage: " + availWidthPerPage)
+        log("availHeightPerPage: " + availHeightPerPage)
+        // print((new Error()).stack)
+        log("---")
+        log("")
+
         this._rowsPerPage = this.rowsForHeight(availHeightPerPage);
-        this._nPages = Math.ceil(nRows / this._rowsPerPage);
-        this._spaceBetweenPages = availHeightPerPage - (this.topPadding + this.bottomPadding) - this._availableHeightPerPageForItems();
+        this._nPages = Math.min(1, Math.ceil(nRows / this._rowsPerPage));
+        this._spaceBetweenPages = Math.max(0, availHeightPerPage - (this.topPadding + this.bottomPadding) - this._availableHeightPerPageForItems());
+
         this._childrenPerPage = nColumns * this._rowsPerPage;
     },
 
@@ -731,6 +751,7 @@ const PaginatedIconGrid = new Lang.Class({
     },
 
     _availableHeightPerPageForItems: function() {
+        log("this._rowsPerPage: " + this._rowsPerPage)
         return this.usedHeightForNRows(this._rowsPerPage) - (this.topPadding + this.bottomPadding);
     },
 

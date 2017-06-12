@@ -117,6 +117,8 @@ shell_generic_container_get_preferred_height (ClutterActor *actor,
   ShellGenericContainerAllocation *alloc = g_slice_new0 (ShellGenericContainerAllocation);
   StThemeNode *theme_node = st_widget_get_theme_node (ST_WIDGET (actor));
 
+  printf("[%s:%d] %s / for_width: %f\n", __FILE__, __LINE__, __FUNCTION__, for_width);
+
   st_theme_node_adjust_for_width (theme_node, &for_width);
 
   alloc->_refcount = 1;
@@ -127,6 +129,10 @@ shell_generic_container_get_preferred_height (ClutterActor *actor,
   if (natural_height_p)
     *natural_height_p = alloc->natural_size;
   shell_generic_container_allocation_unref (alloc);
+
+  printf("[%s:%d] %s / for_width: %f / min_height: %f / nat_height: %f\n",
+         __FILE__, __LINE__, __FUNCTION__,
+         for_width, *min_height_p, *natural_height_p);
 
   st_theme_node_adjust_preferred_height (theme_node, min_height_p, natural_height_p);
 }

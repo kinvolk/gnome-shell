@@ -893,6 +893,11 @@ const ViewStackLayout = new Lang.Class({
     Signals: { 'allocated-size-changed': { param_types: [GObject.TYPE_INT,
                                                          GObject.TYPE_INT] } },
 
+    vfunc_get_preferred_height: function(container, forWidth) {
+        log("ViewsStackLayout:: vfunc_get_preferred_height(" + forWidth + ")")
+        return this.parent(container, forWidth);
+    },
+
     vfunc_allocate: function (actor, box, flags) {
         let availWidth = box.x2 - box.x1;
         let availHeight = box.y2 - box.y1;
